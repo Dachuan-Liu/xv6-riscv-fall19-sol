@@ -75,6 +75,9 @@ sys_read(void)
 
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
+  
+  //printf("sys_read from process %d\n", myproc()->pid);
+  if((uvmcheckalloc(myproc(), p, n, 1)) != 0) return -1;
   return fileread(f, p, n);
 }
 
@@ -87,7 +90,8 @@ sys_write(void)
 
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
-
+  if((uvmcheckalloc(myproc(), p, n, 1)) != 0) return -1;
+  
   return filewrite(f, p, n);
 }
 
@@ -462,6 +466,9 @@ sys_pipe(void)
 
   if(argaddr(0, &fdarray) < 0)
     return -1;
+
+  if((uvmcheckalloc(p, fdarray, sizeof(int) * 2, 1)) != 0) return -1;
+
   if(pipealloc(&rf, &wf) < 0)
     return -1;
   fd0 = -1;

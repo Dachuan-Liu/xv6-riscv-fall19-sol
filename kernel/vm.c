@@ -5,6 +5,9 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+
 
 /*
  * the kernel's page table.
@@ -188,18 +191,23 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0){
-      printf("va=%p pte=%p\n", a, *pte);
-      panic("uvmunmap: not mapped");
+    {
+      //panic("uvmunmap: walk");
     }
-    if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
-    if(do_free){
-      pa = PTE2PA(*pte);
-      kfree((void*)pa);
+    else if((*pte & PTE_V) == 0){
+      //printf("va=%p pte=%p\n", a, *pte);
+      //panic("uvmunmap: not mapped");
     }
-    *pte = 0;
+    else
+    {
+      if(PTE_FLAGS(*pte) == PTE_V)
+        panic("uvmunmap: not a leaf");
+      if(do_free){
+        pa = PTE2PA(*pte);
+        kfree((void*)pa);
+      }
+    }
+    if(pte != 0) *pte = 0;
     if(a == last)
       break;
     a += PGSIZE;
@@ -281,6 +289,8 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   return newsz;
 }
 
+
+
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
 static void
@@ -325,10 +335,10 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    if((pte = walk(old, i, 0)) == 0) continue;
+      //panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0) continue;
+      //panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -450,4 +460,99 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// Recursively print page-table pages.
+static void
+recursivePrintPTE(pagetable_t pagetable, int level)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V)){// && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      for(int j = 0; j < level; ++j) printf(" ..");
+      printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      if(level == 3) continue;
+      uint64 child = PTE2PA(pte);
+      recursivePrintPTE((pagetable_t)child, level + 1);
+    }
+  }
+}
+
+/*
+ * prints the contents of a page table
+ */
+void
+vmprint(pagetable_t base)
+{
+  if(!base) return;
+  printf("page table %p\n", base);
+  recursivePrintPTE(base, 1);
+}
+
+// First check whether va is legal(kernel can access more than user) for p, if not return -1.
+// Otherwise check whether the page containing va is mapped for p, if so return 0.
+// Otherwise try to alloc and map the page for p, return 0 on success, -1 if failed.
+int
+uvmcheckalloc(struct proc *p, uint64 va, uint64 sz, int in_kernel)
+{
+  int new_page = 0;
+  int failure = 0;
+  uint64 addr = va;
+  //vmprint(p->pagetable);
+  uint64 vabase = PGROUNDDOWN(va);
+  if(va >= p->sz) return -1;
+  if(in_kernel){ // kernel cannot access stack guard page
+    if(va >= p->ustack - PGSIZE && va < p->ustack) return -1;
+  }
+  else { // user cannot access below stack
+    if(va < p->ustack) return -1;
+  }
+  
+  //printf("Page faultat %p:\n", r_stval());
+  //vmprint(p->pagetable);
+  uint64 upper = vabase + sz; //PGROUNDUP(sz); // [vabase, upper)
+  for(va = vabase; va < upper; va += PGSIZE){
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if(pte != 0 && (*pte & PTE_V)) continue; // already mapped
+    new_page = 1;
+    char *mem = kalloc();
+    if(mem == 0)
+    {
+      failure = 1;
+      break; // failure
+    }
+    memset(mem, 0, PGSIZE);
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+      kfree(mem);
+      failure = 1;
+      break;
+    }
+  }
+  //printf("[%d, %d) = %d\n", vabase, upper, upper - vabase);
+  
+  if(failure)
+  {
+    //printf("%d < %d\n", va, upper);
+    uvmdealloc(p->pagetable, upper, vabase);
+    return -1;
+  }
+  
+  if(new_page && addr == 1)
+  {/*
+    if(in_kernel) printf("kernel mode");
+    else printf("user mode");
+    printf(" from process %d:\n", p->pid);
+    printf("vabase %p (%d, %d, %d):\n", vabase, PX(2, vabase), PX(1, vabase), PX(0, vabase));
+    printf("upper %p (%d, %d, %d):\n", upper, PX(2, upper), PX(1, upper), PX(0, upper));
+    
+    printf("checking %p (%d, %d, %d):\n", addr, PX(2, addr), PX(1, addr), PX(0, addr));
+    
+    //vmprint(p->pagetable);
+    */
+  }
+  
+  
+  return 0;
 }

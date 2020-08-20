@@ -171,7 +171,9 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-
+// vm.c attached
+void            vmprint(pagetable_t base);
+int             uvmcheckalloc(struct proc *p, uint64 va, uint64 sz, int in_kernel);
 // plic.c
 void            plicinit(void);
 void            plicinithart(void);

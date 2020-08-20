@@ -262,6 +262,8 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  
+  np->ustack = p->ustack;
 
   np->parent = p;
 
