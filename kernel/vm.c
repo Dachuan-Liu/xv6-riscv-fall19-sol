@@ -10,7 +10,11 @@
  * the kernel's page table.
  */
 pagetable_t kernel_pagetable;
-
+/*
+ * the kernel's page reference count.
+ */
+pagetable_t kernel_pageref;
+//struct spinlock pageref_lock;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
@@ -28,6 +32,10 @@ kvminit()
   kernel_pagetable = (pagetable_t) kalloc();
   memset(kernel_pagetable, 0, PGSIZE);
 
+  kernel_pageref = (pagetable_t) kalloc();
+  memset(kernel_pageref, 0, PGSIZE);
+  //initlock(&pageref_lock, "pageref");
+  
   // uart registers
   kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
@@ -75,6 +83,7 @@ kvminithart()
 //   21..39 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..12 -- 12 bits of byte offset within the page.
+// DO NOTICE LEVEL-0 INDEX WHEN CREATED HAS NO FLAGS!
 static pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
@@ -163,8 +172,14 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
+    if(*pte & PTE_V){
+      pte_t *ref = walk(kernel_pageref, pa, 1);
+      printf("ref_cnt == %d\n", *ref);
+      printf("flags == %p\n", PTE_FLAGS(*pte));
+      printf("*pte == %p\n", *pte);
+      printf("pa == %p\n", PTE2PA(*pte));
       panic("remap");
+    }
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -174,9 +189,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
-// Remove mappings from a page table. The mappings in
-// the given range must exist. Optionally free the
-// physical memory.
+// Remove mappings from a page table.
+// Optionally free the unshared physical memory.
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
 {
@@ -187,8 +201,8 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+    if((pte = walk(pagetable, a, 0)) == 0) continue;
+      //panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0){
       printf("va=%p pte=%p\n", a, *pte);
       panic("uvmunmap: not mapped");
@@ -197,7 +211,15 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
       panic("uvmunmap: not a leaf");
     if(do_free){
       pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      pte_t *ref = walk(kernel_pageref, pa, 1);
+      if(*ref < 0){
+        panic("uvmunmap: *ref < 0");
+      } else if(*ref <= 1){ // *ref == 0, 1
+        kfree((void*)pa);
+        *ref = 0;
+      } else{ // *ref > 1
+        *ref -= 1;
+      }
     }
     *pte = 0;
     if(a == last)
@@ -312,37 +334,61 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 
 // Given a parent process's page table, copy
 // its memory into a child's page table.
-// Copies both the page table and the
+// Copies only the page table and mappings to the
 // physical memory.
 // returns 0 on success, -1 on failure.
-// frees any allocated pages on failure.
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
+  pte_t *ref;
   uint64 pa, i;
-  uint flags;
-  char *mem;
+  int flags;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    if((pte = walk(old, i, 0)) == 0) continue;
+      //panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0) continue;
+      //panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if((ref = walk(kernel_pageref, pa, 1)) == 0)
+        goto err;
+    /* DEPRECATED (WORDY AND CLUMSY)
+    if(flags & PTE_W){ // essentially writable and (of course) first shared
+      if(*ref == 0){ // *ref can only be 0
+        *ref = 2;
+        flags &= (~PTE_W); // make it unwritable
+      }
+      else goto err;
+    }
+    else{ // currently unwritable
+      if(*ref == 0){ // essentially unwritable
+        *ref == 2;
+      }
+      else if(*ref > 0){ // essentially writable but already shared
+        *ref += 1; // just increment *ref
+      }
+      else goto err;
+    }*/
+    if(*ref == 0){ // not shared
+      *ref = 2;
+    }
+    else if(*ref > 0){  // already shared
+      *ref += 1;
+    }
+    if(flags & PTE_W){ // writable
+      flags &= (~PTE_W); // make it unwritable
+      *pte &= (~PTE_W);
+    }
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
   }
   return 0;
 
  err:
-  uvmunmap(new, 0, i, 1);
+  uvmunmap(new, 0, i, 1); // the guideline "don't free shared pages" is implemented in uvmunmap
   return -1;
 }
 
@@ -372,6 +418,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+    kvmcheckcow(pagetable, va0, &pa0);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -450,4 +497,70 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+/*
+// Return the address of the PTE in page table pageref
+// that corresponds to virtual address va.
+// create any required page-table pages.
+//
+// The risc-v Sv39 scheme has three levels of page-table
+// pages. A page-table page contains 512 64-bit PTEs.
+// A 64-bit virtual address is split into five fields:
+//   39..63 -- must be zero.
+//   30..38 -- 9 bits of level-2 index.
+//   21..39 -- 9 bits of level-1 index.
+//   12..20 -- 9 bits of level-0 index.
+//    0..12 -- 12 bits of byte offset within the page.
+static pte_t *
+getpageref(pagetable_t pageref, uint64 va)
+{
+  if(va >= MAXVA)
+    panic("walk");
+
+  for(int level = 2; level > 0; level--) {
+    pte_t *pte = &pageref[PX(level, va)];
+    if(*pte & PTE_V) {
+      pageref = (pagetable_t)PTE2PA(*pte);
+    } else {
+      if((pageref = (pde_t*)kalloc()) == 0)
+        return 0;
+      memset(pageref, 0, PGSIZE);
+      *pte = PA2PTE(pageref) | PTE_V;
+    }
+  }
+  return &pageref[PX(0, va)]; // 
+}*/
+
+// Return the 1 if copyied on write
+int
+kvmcheckcow(pagetable_t pagetable, uint64 va, uint64 *old_pa)
+{
+  
+  pte_t *pte = walk(pagetable, va, 0);
+  if(!pte || (*pte & PTE_W)) goto not_cow;
+  uint64 pa = PTE2PA(*pte);
+  //acquire(&pageref_lock);
+  pte_t *ref = walk(kernel_pageref, pa, 0);
+  if(!ref) goto not_cow;
+  if(*ref > 1){ // copy on write
+    char *mem = kalloc();
+    if(mem == 0) goto not_cow;
+    memmove(mem, (char *)pa, PGSIZE);
+    int flags = PTE_FLAGS(*pte) | PTE_W;
+    *pte = PA2PTE(mem) | flags;// allocate a writable page to *pte
+    *ref -= 1;
+    if(old_pa != 0)
+      *old_pa = (uint64)mem;
+  }
+  else if(*ref == 1)
+  {
+    *pte = (*pte) | PTE_W; // if no other process share this physical page, make it writable for current process
+  }
+  else goto not_cow;
+  
+  //release(&pageref_lock);
+  return 1;
+ not_cow:
+  //release(&pageref_lock);
+  return 0;
 }

@@ -9,6 +9,7 @@
 struct spinlock tickslock;
 uint ticks;
 
+//extern struct spinlock pagereflock;
 extern char trampoline[], uservec[], userret[];
 
 // in kernelvec.S, calls kerneltrap().
@@ -67,7 +68,15 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    struct proc *p = myproc();
+    uint64 va = r_stval();
+    if(!kvmcheckcow(p->pagetable, va, 0)){
+      printf("unknwon page fault\n");
+      goto undetected;
+    }
   } else {
+   undetected:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
