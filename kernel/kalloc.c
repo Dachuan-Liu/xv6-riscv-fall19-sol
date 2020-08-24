@@ -21,15 +21,66 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  char *start;
+  uint *ref_cnt;
 } kmem;
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  kmem.ref_cnt = (uint *)PGROUNDUP((uint64)end);
+  uint ref_len = ((((uint64)PHYSTOP - (uint64)end) >> 12) + 1);
+  memset(kmem.ref_cnt, 0, ref_len * sizeof(uint));
+  
+  kmem.start = (char *)PGROUNDUP((uint64)kmem.ref_cnt + ref_len * sizeof(uint));
+  
+  freerange(kmem.start, (void*)PHYSTOP);
+  
 }
 
+uint
+krefindex(uint64 pa)
+{
+  return PGROUNDDOWN(pa - (uint64)kmem.start) / PGSIZE;
+}
+
+uint *
+kref(uint64 pa)
+{
+  return &(kmem.ref_cnt[krefindex(pa)]);
+}
+/*
+uint
+krefget(uint64 pa)
+{
+  uint index = krefindex(pa);
+  return kmem.ref_cnt[index];
+  
+}
+
+void
+krefinc(uint64 pa)
+{
+  uint index = krefindex(pa);
+  kmem.ref_cnt[index] += 1;
+  
+}
+
+void
+krefdec(uint64 pa)
+{
+  uint index = krefindex(pa);
+  kmem.ref_cnt[index] -= 1;
+}
+
+void
+krefset(uint64 pa, uint ref)
+{
+  uint index = krefindex(pa);
+  kmem.ref_cnt[index] = ref;
+  
+}*/
 void
 freerange(void *pa_start, void *pa_end)
 {
@@ -59,6 +110,8 @@ kfree(void *pa)
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
+  uint *ref = kref((uint64)pa);
+  (*ref) = 0;
   release(&kmem.lock);
 }
 
@@ -72,11 +125,15 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    uint *ref = kref((uint64)r);
+    (*ref) = 1;
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+  
   return (void*)r;
 }

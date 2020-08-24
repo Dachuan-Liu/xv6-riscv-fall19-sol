@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
 
 /*
  * the kernel's page table.
@@ -13,8 +14,7 @@ pagetable_t kernel_pagetable;
 /*
  * the kernel's page reference count.
  */
-pagetable_t kernel_pageref;
-//struct spinlock pageref_lock;
+struct spinlock refcnt_lock;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
@@ -32,9 +32,7 @@ kvminit()
   kernel_pagetable = (pagetable_t) kalloc();
   memset(kernel_pagetable, 0, PGSIZE);
 
-  kernel_pageref = (pagetable_t) kalloc();
-  memset(kernel_pageref, 0, PGSIZE);
-  //initlock(&pageref_lock, "pageref");
+  initlock(&refcnt_lock, "pageref");
   
   // uart registers
   kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
@@ -173,11 +171,6 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
     if(*pte & PTE_V){
-      pte_t *ref = walk(kernel_pageref, pa, 1);
-      printf("ref_cnt == %d\n", *ref);
-      printf("flags == %p\n", PTE_FLAGS(*pte));
-      printf("*pte == %p\n", *pte);
-      printf("pa == %p\n", PTE2PA(*pte));
       panic("remap");
     }
     *pte = PA2PTE(pa) | perm | PTE_V;
@@ -211,15 +204,17 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
       panic("uvmunmap: not a leaf");
     if(do_free){
       pa = PTE2PA(*pte);
-      pte_t *ref = walk(kernel_pageref, pa, 1);
-      if(*ref < 0){
-        panic("uvmunmap: *ref < 0");
-      } else if(*ref <= 1){ // *ref == 0, 1
+      uint *ref = kref(pa);
+      acquire(&refcnt_lock);
+      if(*ref < 1){
+        panic("uvmunmap: *ref <= 0");
+      } else if(*ref == 1){ // *ref == 1
         kfree((void*)pa);
         *ref = 0;
       } else{ // *ref > 1
         *ref -= 1;
       }
+      release(&refcnt_lock);
     }
     *pte = 0;
     if(a == last)
@@ -341,7 +336,7 @@ int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
-  pte_t *ref;
+  uint *ref;
   uint64 pa, i;
   int flags;
 
@@ -352,34 +347,15 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       //panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((ref = walk(kernel_pageref, pa, 1)) == 0)
-        goto err;
-    /* DEPRECATED (WORDY AND CLUMSY)
-    if(flags & PTE_W){ // essentially writable and (of course) first shared
-      if(*ref == 0){ // *ref can only be 0
-        *ref = 2;
-        flags &= (~PTE_W); // make it unwritable
-      }
-      else goto err;
-    }
-    else{ // currently unwritable
-      if(*ref == 0){ // essentially unwritable
-        *ref == 2;
-      }
-      else if(*ref > 0){ // essentially writable but already shared
-        *ref += 1; // just increment *ref
-      }
-      else goto err;
-    }*/
-    if(*ref == 0){ // not shared
-      *ref = 2;
-    }
-    else if(*ref > 0){  // already shared
-      *ref += 1;
-    }
+    ref = kref(pa);
+    acquire(&refcnt_lock);
+    *ref += 1;
+    release(&refcnt_lock);
     if(flags & PTE_W){ // writable
-      flags &= (~PTE_W); // make it unwritable
+      flags &= (~PTE_W); // denote it unwritable and cow page
+      flags |= PTE_SHARE;
       *pte &= (~PTE_W);
+      *pte |= PTE_SHARE; // denote it as cow page (essentially writable but shared)
     }
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
@@ -498,69 +474,52 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
-/*
-// Return the address of the PTE in page table pageref
-// that corresponds to virtual address va.
-// create any required page-table pages.
-//
-// The risc-v Sv39 scheme has three levels of page-table
-// pages. A page-table page contains 512 64-bit PTEs.
-// A 64-bit virtual address is split into five fields:
-//   39..63 -- must be zero.
-//   30..38 -- 9 bits of level-2 index.
-//   21..39 -- 9 bits of level-1 index.
-//   12..20 -- 9 bits of level-0 index.
-//    0..12 -- 12 bits of byte offset within the page.
-static pte_t *
-getpageref(pagetable_t pageref, uint64 va)
-{
-  if(va >= MAXVA)
-    panic("walk");
 
-  for(int level = 2; level > 0; level--) {
-    pte_t *pte = &pageref[PX(level, va)];
-    if(*pte & PTE_V) {
-      pageref = (pagetable_t)PTE2PA(*pte);
-    } else {
-      if((pageref = (pde_t*)kalloc()) == 0)
-        return 0;
-      memset(pageref, 0, PGSIZE);
-      *pte = PA2PTE(pageref) | PTE_V;
-    }
-  }
-  return &pageref[PX(0, va)]; // 
-}*/
-
-// Return the 1 if copyied on write
+// Return 1 if copyied on write
 int
-kvmcheckcow(pagetable_t pagetable, uint64 va, uint64 *old_pa)
+kvmcheckcow(pagetable_t pagetable, uint64 va, uint64 *pa0)
 {
-  
   pte_t *pte = walk(pagetable, va, 0);
-  if(!pte || (*pte & PTE_W)) goto not_cow;
+  if(!pte){
+    //printf("kvmcheckcow: no pte\n");
+    goto not_cow;
+  }
+  if(!(*pte & PTE_SHARE)){
+    //printf("kvmcheckcow: not cow page\n");
+    goto not_cow;
+  }
   uint64 pa = PTE2PA(*pte);
-  //acquire(&pageref_lock);
-  pte_t *ref = walk(kernel_pageref, pa, 0);
-  if(!ref) goto not_cow;
-  if(*ref > 1){ // copy on write
-    char *mem = kalloc();
-    if(mem == 0) goto not_cow;
-    memmove(mem, (char *)pa, PGSIZE);
-    int flags = PTE_FLAGS(*pte) | PTE_W;
-    *pte = PA2PTE(mem) | flags;// allocate a writable page to *pte
-    *ref -= 1;
-    if(old_pa != 0)
-      *old_pa = (uint64)mem;
-  }
-  else if(*ref == 1)
-  {
-    *pte = (*pte) | PTE_W; // if no other process share this physical page, make it writable for current process
-  }
-  else goto not_cow;
+  //acquire(&refcnt_lock);
+  uint *ref = kref(pa);
   
-  //release(&pageref_lock);
+  if(*ref > 1){ // copy on write
+    
+    char *mem = kalloc();
+    if(mem == 0){
+      //printf("kvmcheckcow: mem == 0\n");
+      goto not_cow;
+    }
+    memmove(mem, (char *)pa, PGSIZE);
+    int flags = (PTE_FLAGS(*pte) | PTE_W) & (~PTE_SHARE);
+    *pte = PA2PTE(mem) | flags;// allocate a writable page to *pte
+    if(pa0 != 0)
+      *pa0 = (uint64)mem;
+    acquire(&refcnt_lock);
+    *ref -= 1;
+    release(&refcnt_lock);
+  }
+  else if(*ref == 1){ // left over by share-holders
+    *pte |= PTE_W; // if no other process share this physical page, make it writable for current process
+    *pte &= (~PTE_SHARE);
+  }
+  else{
+    //printf("kvmcheckcow: *ref <= 0\n");
+    goto not_cow; // *ref <= 0
+  }
+  
+  //release(&refcnt_lock);
   return 1;
  not_cow:
-  //release(&pageref_lock);
+  //release(&refcnt_lock);
   return 0;
 }
