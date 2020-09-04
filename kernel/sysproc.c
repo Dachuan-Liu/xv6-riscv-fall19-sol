@@ -95,3 +95,27 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sigalarm(void)
+{
+  struct proc *p = myproc();
+  uint64 ticks = p->tf->a0;
+  uint64 handler = p->tf->a1;
+  
+  p->handler = (uint64)handler;
+  p->period = ticks;
+  p->nticks = 0;
+  
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  //printf("ra: %p, pc: %p\n", p->tf->ra, p->tf->epc);
+  *(p->tf) = *(p->tf1);
+  //printf("ra: %p, pc: %p\n", p->tf->ra, p->tf->epc);
+  return 0;
+}

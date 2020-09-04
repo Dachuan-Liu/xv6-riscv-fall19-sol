@@ -1,0 +1,4 @@
+Registers with prefix "a-" contain arguments to functions. Register a2 holds 13 in main's call to printf.
+Main doesn't call f, and evaluate constant expression "f(8)+1" as 12 in line 0x26, "li	a1,12". Similarly, f doesn't call g, but duplicate g's work from line 0x14 to line 0x1a.
+The function printf is located at [0x650, 0x686).
+Register ra (return address) is just at 0x38 (address of the call to exit(0)) after the jalr to printf in main.

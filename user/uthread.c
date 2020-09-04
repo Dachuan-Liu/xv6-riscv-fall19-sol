@@ -10,14 +10,48 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+// Saved registers for user thread context switches.
+struct thread_context {
+  uint64 ra;
+  uint64 sp;
+
+  // callee-saved
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+};
+
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
+  struct thread_context cntxt;
+
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
 extern void thread_switch(uint64, uint64);
+//extern void thread_switch(uint64 old_thread, uint64 new_thread);
               
+
+void
+printState(void)
+{
+  printf("current_thread == %d\n", (current_thread - all_thread));
+  for(int i = 0; i < MAX_THREAD; i++){
+    printf("all_thread[%d].state == %d\n", i, all_thread[i].state);
+    //all_thread[i].state = FREE;
+  }
+  
+}
 void 
 thread_init(void)
 {
@@ -26,6 +60,10 @@ thread_init(void)
   // save thread 0's state.  thread_schedule() won't run the main thread ever
   // again, because its state is set to RUNNING, and thread_schedule() selects
   // a RUNNABLE thread.
+  for(int i = 0; i < MAX_THREAD; i++){
+    printf("all_thread[%d].state == %d\n", i, all_thread[i].state);
+    all_thread[i].state = FREE;
+  }
   current_thread = &all_thread[0];
   current_thread->state = RUNNING;
 }
@@ -34,7 +72,7 @@ void
 thread_schedule(void)
 {
   struct thread *t, *next_thread;
-
+  
   /* Find another runnable thread. */
   next_thread = 0;
   t = current_thread + 1;
@@ -47,7 +85,6 @@ thread_schedule(void)
     }
     t = t + 1;
   }
-
   if (next_thread == 0) {
     printf("thread_schedule: no runnable threads\n");
     exit(-1);
@@ -57,6 +94,11 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
+    if(t - all_thread > 0 && t->state != FREE)
+      t->state = RUNNABLE;
+    else
+      t->state = FREE;
+    thread_switch((uint64)(&(t->cntxt)), (uint64)(&(current_thread->cntxt)));
     /* YOUR CODE HERE
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
@@ -69,11 +111,13 @@ void
 thread_create(void (*func)())
 {
   struct thread *t;
-
   for (t = all_thread; t < all_thread + MAX_THREAD; t++) {
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
+  t->cntxt.ra = (uint64)func;
+  t->cntxt.sp = (uint64)t->stack + STACK_SIZE;
+  // init thread stacks (set pc to func, sp to t->stack + 
   // YOUR CODE HERE
 }
 
