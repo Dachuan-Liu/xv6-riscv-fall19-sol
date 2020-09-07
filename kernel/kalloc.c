@@ -21,13 +21,33 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+  uint64 npages;
+} kmem[NCPU];
+
+void
+printKnem(char *str)
+{
+  printf("%s\n", str);
+  int total = 0;
+  for(int i = 0; i < NCPU; ++i){
+    total += kmem[i].npages;
+    printf("Core %d: %d\n", i, kmem[i].npages);
+  }
+  printf("total: %d\n", total);
+}
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  //printKnem("before init");
+  for(int i = 0; i < NCPU; ++i){
+    initlock(&kmem[i].lock, "kmem");
+    kmem[i].freelist = 0;
+    kmem[i].npages = 0;
+  }
+  //printKnem("before freerange");
   freerange(end, (void*)PHYSTOP);
+  //printKnem("after init");
 }
 
 void
@@ -55,11 +75,14 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  push_off();
+  int id = cpuid();
+  acquire(&kmem[id].lock);
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
+  kmem[id].npages += 1;
+  release(&kmem[id].lock);
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -68,15 +91,60 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
+  //printKnem("before kalloc");
+  
+  const int page_unit = 8;
   struct run *r;
+  struct run *stolen_head = 0, *stolen_tail = 0;
+  int toSteal = 0;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  push_off();
+  int id = cpuid();
+  acquire(&kmem[id].lock);
+  r = kmem[id].freelist;
+  if(r){
+    kmem[id].freelist = r->next;
+    kmem[id].npages -= 1;
+    release(&kmem[id].lock);
+  }
+  else{
+    release(&kmem[id].lock);
+    // find victim CPU with free pages
+    for(int i = 0; i < NCPU; ++i){
+      //r = stolen_head = stolen_tail = 0;
+      //toSteal = 0;
+      acquire(&kmem[i].lock);
+      if(kmem[i].npages > 0){
+        r = kmem[i].freelist;
+        kmem[i].freelist = kmem[i].freelist->next;
+        kmem[i].npages -= 1;
+      }
+      if((i != id) && kmem[i].npages > page_unit * 2){ // only steal other CPU with adequate free pages
+        toSteal = page_unit;
+        stolen_head = stolen_tail = kmem[i].freelist;
+        for(int j = 0; j < toSteal - 1; ++j){ // steal [stolen_head, stolen_tail]
+          stolen_tail = stolen_tail->next;
+        }
+        kmem[i].npages -= toSteal;
+        kmem[i].freelist = stolen_tail->next;
+        stolen_tail->next = 0;
+      }
+      release(&kmem[i].lock);
+      if(r) break; // found victim
+    }
+  }
 
+  if(toSteal > 0){
+    acquire(&kmem[id].lock);
+    stolen_tail->next = kmem[id].freelist;
+    kmem[id].freelist = stolen_head;
+    kmem[id].npages += toSteal;
+    release(&kmem[id].lock);
+    //printKnem("after stealing");
+  }
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+  pop_off();
+  //printf("allocated %p from %d\n", (void*)r, id);
   return (void*)r;
 }
