@@ -4,4 +4,5 @@ Large files:
   itrunc中递归释放block，注意*(ip->addrs[NDIRECT - 1 + level])实际文件block之间仅有(level - 1)个indirect block
 Symbolic links:
   软链接文件格式：strlen（路径字符数组） + 路径字符数组；大小：sizeof（strlen（路径字符数组）） + strlen（路径字符数组） + 1
-  sys_symlink创建软链接格式文件，sys_open在（ip = namei(path)）之后循环处理ip->type == T_SYMLINK的情况
+  sys_symlink创建软链接格式文件
+  sys_open在（ip = namei(path)）之后循环处理ip->type == T_SYMLINK的情况，注意create返回的ip已经获取了sleeplock，再ilock（ip）会死锁
