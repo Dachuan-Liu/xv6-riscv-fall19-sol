@@ -388,21 +388,84 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
-      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+  int bound = NINDIRECT;
+  for(int level = 1; level <= LINDIRECT; ++level){
+    // level: number of indirect blocks between current block
+    // and actual file blocks
+    if(bn < bound){
+      // Load indirect block, allocating if necessary.
+      if((addr = ip->addrs[NDIRECT - 1 + level]) == 0)
+        ip->addrs[NDIRECT -1 + level] = addr = balloc(ip->dev);
+      // Now we have addr pointing to the allocated block
+      
+      for(int i = level - 1; i >= 0; --i){
+        // i indirect blocks between bp and actual file blocks
+        bp = bread(ip->dev, addr);
+        a = (uint*)bp->data;
+        int index = bn;
+        for(int j = 1; j <= i; ++j)
+        //while(index > NINDIRECT)
+          index /= NINDIRECT;
+        index %= NINDIRECT;
+        if((addr = a[index]) == 0){
+          a[index] = addr = balloc(ip->dev);
+          log_write(bp);
+        }
+        brelse(bp);
+      }
+      
+      return addr;
+    }
+    bn -= bound;
+    bound *= NINDIRECT;
+  }
+  /* else if(bn < NINDIRECT + NINDIRECT * NINDIRECT){
+    bn -= NINDIRECT;
+    // Load doubly-indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT + 1]) == 0)
+      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
-      a[bn] = addr = balloc(ip->dev);
+    if((addr = a[bn / NINDIRECT]) == 0){
+      a[bn / NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn % NINDIRECT]) == 0){
+      a[bn % NINDIRECT] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
     return addr;
-  }
+  }*/
 
   panic("bmap: out of range");
+}
+
+// Recursively free multi-level indirect blocks
+void
+bfreeIndirect(struct inode *ip, uint addr, int level)
+{
+  if(ip == 0 || addr == 0 || level < 0) return;
+
+  struct buf *bp = bread(ip->dev, addr);
+  uint *a = (uint *)bp->data;
+  for(int i = 0; i < NINDIRECT; ++i){
+    if(a[i]){
+      if(level == 0)
+        bfree(ip->dev, a[i]);
+      else if(level > 0)
+        bfreeIndirect(ip, a[i], level - 1);
+      else
+        panic("bfreeIndirect: negative level");
+      //log_write(bp); // no need to log: bp will be freed anyway
+    }
+  }
+  brelse(bp);
+  bfree(ip->dev, addr);
 }
 
 // Truncate inode (discard contents).
@@ -413,17 +476,19 @@ bmap(struct inode *ip, uint bn)
 static void
 itrunc(struct inode *ip)
 {
-  int i, j;
+  /*int i, j;
   struct buf *bp;
-  uint *a;
-
+  uint *a;*/
+  int i;//, j;
+  //struct buf *bp;
+  //uint *a;
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
-
+/*
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -436,6 +501,21 @@ itrunc(struct inode *ip)
     ip->addrs[NDIRECT] = 0;
   }
 
+  ip->size = 0;
+  iupdate(ip);
+*/
+
+  for(int level = 1; level <= LINDIRECT; ++level){
+    if(ip->addrs[NDIRECT - 1 + level]){
+      // Load indirect block, allocating if necessary.
+      // Now we have addr pointing to the allocated block
+      // Recursively free blocks
+      bfreeIndirect(ip, ip->addrs[NDIRECT - 1 + level], level - 1);
+      // ONLY (level - 1) blocks
+      // between ip->addrs[NDIRECT - 1 + level]!!!
+      ip->addrs[NDIRECT - 1 + level] = 0;
+    }
+  }
   ip->size = 0;
   iupdate(ip);
 }

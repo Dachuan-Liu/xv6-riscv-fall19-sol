@@ -1,0 +1,7 @@
+Large files:
+  引入宏定义LINDIRECT（level of indirect blocks）并对应修改NDIRECT、MAXFILE等，轻松扩展至multiply-indirect block
+  bmap中利用level概念（number of indirect blocks between current block and actual file blocks），迭代处理不同LINDIRECT下，注意bn与不同level的index对应关系。
+  itrunc中递归释放block，注意*(ip->addrs[NDIRECT - 1 + level])实际文件block之间仅有(level - 1)个indirect block
+Symbolic links:
+  软链接文件格式：strlen（路径字符数组） + 路径字符数组；大小：sizeof（strlen（路径字符数组）） + strlen（路径字符数组） + 1
+  sys_symlink创建软链接格式文件，sys_open在（ip = namei(path)）之后循环处理ip->type == T_SYMLINK的情况

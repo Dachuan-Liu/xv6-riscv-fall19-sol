@@ -309,6 +309,47 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    
+    // check T_SYMLINK
+    if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+      //printf("checking T_SYMLINK\n");
+      int cnt = 0;
+      // recursively open link
+      //struct inode *ip_new;
+      while(ip->type == T_SYMLINK){
+        if(cnt > 10){
+          iunlockput(ip);
+          end_op(ROOTDEV);
+          return -1;
+        }
+        int len;
+        if(readi(ip, 0, (uint64)&len, 0, sizeof(len)) != sizeof(len)){
+          iunlockput(ip);
+          end_op(ROOTDEV);
+          return -1;
+        }
+        if(len > MAXPATH){
+          printf("open: corrupted symlink\n");
+          iunlockput(ip);
+          end_op(ROOTDEV);
+          return -1;
+        }
+        if(readi(ip, 0, (uint64)path, sizeof(len), len + 1) != len + 1){
+          iunlockput(ip);
+          end_op(ROOTDEV);
+          return -1;
+        }
+        //printf("target: %s\n", path);
+        iunlockput(ip);
+        if((ip = namei(path)) == 0){
+          end_op(ROOTDEV);
+          return -1;
+        }
+        ilock(ip);
+        ++cnt;
+      }
+    }
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op(ROOTDEV);
@@ -483,3 +524,42 @@ sys_pipe(void)
   return 0;
 }
 
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], link[MAXPATH];
+  struct inode *ip;
+  int n1, n2;
+
+  if((n1 = argstr(0, target, MAXPATH)) < 0 || (n2 = argstr(1, link, MAXPATH)) < 0)
+    return -1;
+  //printf("target: %s\n", target);
+  //printf("link: %s\n", link);
+  int len = strlen(target);
+  //printf("len(target) == %d\n", len);
+  begin_op(ROOTDEV);
+
+  if((ip = create(link, T_SYMLINK, 0, 0)) == 0){
+    end_op(ROOTDEV);
+    return -1;
+  }
+  //printf("created symlink file\n");
+  if(writei(ip, 0, (uint64)&len, 0, sizeof(len)) != sizeof(len)){
+    iunlockput(ip);
+    end_op(ROOTDEV);
+    return -1;
+  }
+  //printf("written len to symlink file\n");
+  if(writei(ip, 0, (uint64)target, sizeof(len), len + 1) != len + 1){
+    iunlockput(ip);
+    end_op(ROOTDEV);
+    return -1;
+  }
+  //printf("written target to symlink file\n");
+  
+  iunlockput(ip);
+  end_op(ROOTDEV);
+  
+  //printf("before returning from sys_symlink\n");
+  return 0;
+}
