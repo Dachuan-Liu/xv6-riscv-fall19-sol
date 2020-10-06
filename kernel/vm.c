@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "proc.h"
+#include "file.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -449,5 +454,139 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+struct vma *
+allocvma()
+{
+  struct proc *p = myproc();
+  for(int i = 0; i < VMA_NUM; ++i){
+    if(p->vmas[i].used == 0){
+      p->vmas[i].used = 1;
+      p->vmas[i].addr = VMA_BASE + VMA_SIZE * i;
+      return &(p->vmas[i]);
+    }
+  }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  
+  struct proc *p = myproc();
+  uint64 addr, length;
+  int prot, flags, fd;
+  uint64 offset;
+  argaddr(0, &addr); // default to 0
+  argaddr(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argaddr(5, &offset); // default to 0
+  printf("argv of mmap: %p, %d, %d, %d, %d, %d\n",
+         addr, length, prot, flags, fd, offset);
+  if(addr != 0 || offset != 0)
+    return -1;
+  struct file *f = p->ofile[fd];
+  if(!f || f->type != FD_INODE)
+    return -1;
+  if(!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return -1;
+  struct vma *vma;
+  if((vma = allocvma()) == 0)
+    return -1;;
+  vma->length = length;
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->offset = offset;
+  vma->file = f;
+  filedup(f);
+  return vma->addr;
+  
+  return -1;
+}
+
+uint64
+munmap(uint64 addr, uint64 length)
+{
+  
+  if(addr < VMA_BASE || addr > VMA_END)
+    return -1;
+  int idx = (addr - VMA_BASE) / VMA_SIZE;
+  struct proc *p = myproc();
+  struct vma *vma = &p->vmas[idx];
+  struct file *f = vma->file;
+  if(!vma->used)
+    return -1;
+  if(addr != vma->addr && addr + length != vma->addr + vma->length)
+    return -1;
+  pte_t *pte;
+  uint64 pa;
+  for(uint64 va = addr; va < addr + length; va = PGROUNDDOWN(va) + PGSIZE){
+    if((pte = walk(p->pagetable, va, 0)) && (*pte & PTE_V)){
+      pa = PTE2PA(*pte);
+      if((vma->flags & MAP_SHARED) && (kgetref((void *)pa) == 1)){
+        printf("writing back MAP_SHARED\n");
+        uint64 filepos = va - vma->addr;
+        int remainder = addr + length - va;
+        uint64 size = (PGSIZE < remainder) ? PGSIZE : remainder;
+        
+        
+        begin_op(f->ip->dev);
+        ilock(f->ip);
+        writei(f->ip, 0, pa, filepos, size);
+        iunlock(f->ip);
+        end_op(f->ip->dev);
+      }
+      uvmunmap(p->pagetable, va, PGSIZE, 0);
+      kderef((void *)pa);
+    }
+  }
+  if(addr == vma->addr)
+    vma->addr += length;
+  vma->length -= length;
+  if(vma->length == 0){
+    vma->used = 0;
+    fileclose(vma->file);
+  }
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+  argaddr(0, &addr); // default to 0
+  argaddr(1, &length);
+  printf("argv of munmap: %p, %d\n", addr, length);
+  return munmap(addr, length);
+}
+
+void
+mmap_dup(pagetable_t pagetable, struct vma *v)
+{
+  pte_t *pte;
+  uint64 pa;
+  for(uint64 va = v->addr; va < v->addr + v->length; va += PGSIZE){
+    if((pte = walk(pagetable, va, 0)) && (*pte & PTE_V)){
+      pa = PTE2PA(*pte);
+      kref((void *)pa);
+    }
+  }
+}
+
+void
+mmap_dedup(pagetable_t pagetable, struct vma *v)
+{
+  pte_t *pte;
+  uint64 pa;
+  for(uint64 va = v->addr; va < v->addr + v->length; va += PGSIZE){
+    if((pte = walk(pagetable, va, 0)) && (*pte & PTE_V)){
+      pa = PTE2PA(*pte);
+      uvmunmap(pagetable, va, PGSIZE, 0);
+      kderef((void *)pa);
+    }
   }
 }

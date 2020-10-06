@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -68,9 +72,46 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // 13 read, 15 write
+    // process();
+    uint64 addr = r_stval();
+    if(addr < VMA_BASE || addr > VMA_END)
+      goto usertrap_bad;
+    int idx = (addr - VMA_BASE) / VMA_SIZE;
+    struct vma *vma = &p->vmas[idx];
+    if(!vma->used)
+      goto usertrap_bad;
+    if(addr < vma->addr || addr > vma->addr + vma->length)
+      goto usertrap_bad;
+    uint64 filepos = addr - vma->addr;
+    int remainder = vma->length - filepos;
+    uint64 size = (PGSIZE < remainder) ? PGSIZE : remainder;
+    int prot = vma->prot;
+    int flags = vma->flags;
+    if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+      panic("sys_mmap: flags");
+    int pte_flag = 0;
+    if(prot & PROT_READ) pte_flag |= PTE_R;
+    if(prot & PROT_WRITE) pte_flag |= PTE_W;
+    uint64 pa = (uint64)kalloc();
+    if(!pa)
+      panic("out of memory");
+    memset((void *)pa, 0, PGSIZE);
+    struct file *f = vma->file;
+    begin_op(f->ip->dev);
+    ilock(f->ip);
+    readi(f->ip, 0, pa, filepos, size);
+    iunlock(f->ip);
+    end_op(f->ip->dev);
+    if(mappages(p->pagetable, PGROUNDDOWN(addr), PGSIZE, pa, pte_flag | PTE_U) != 0){
+      kfree((void *)pa);
+      
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+  usertrap_bad:
     printf("usertrap(): unexpected scause %p (%s) pid=%d\n", r_scause(), scause_desc(r_scause()), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

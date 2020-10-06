@@ -80,6 +80,23 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+#define VMA_BASE (1L << 37)
+#define VMA_SIZE (1L << 30)
+#define VMA_NUM 64
+#define VMA_END (VMA_BASE+VMA_SIZE*VMA_NUM)
+
+// mmap and munmap
+struct vma {
+  uint64 addr; // starting address of VMA
+  int length;
+  int prot;
+  int flags;
+  int offset;
+  int used;
+  struct file *file;
+};
+
+
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -103,4 +120,6 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  
+  struct vma vmas[VMA_NUM];
 };

@@ -275,6 +275,15 @@ fork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+  // Duplicate vmas
+  for(int i = 0; i < VMA_NUM; ++i){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      filedup(p->vmas[i].file);
+      mmap_dup(p->pagetable, &p->vmas[i]);
+    }
+  }
+  
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -333,6 +342,15 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+  // Close all vmas
+  
+  for(int i = 0; i < VMA_NUM; ++i){
+    if(p->vmas[i].used){
+      //munmap(p->vmas[i].addr, p->vmas[i].length);
+      mmap_dedup(p->pagetable, &p->vmas[i]);
+    }
+  }
+  
 
   begin_op(ROOTDEV);
   iput(p->cwd);

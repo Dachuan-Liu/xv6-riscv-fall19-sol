@@ -8,7 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
-
+struct vma;
 // bio.c
 void            binit(void);
 struct buf*     bread(uint, uint);
@@ -63,6 +63,9 @@ void*           kalloc(void);
 void            kfree(void *);
 void            kinit();
 
+void            kref(void *pa);
+void            kderef(void *pa);
+uint            kgetref(void *pa);
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);
@@ -171,7 +174,9 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-
+uint64          munmap(uint64 addr, uint64 length);
+void            mmap_dup(pagetable_t pagetable, struct vma *v);
+void            mmap_dedup(pagetable_t pagetable, struct vma *v);
 // plic.c
 void            plicinit(void);
 void            plicinithart(void);
